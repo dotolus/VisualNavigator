@@ -1,0 +1,248 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <title>Tree Zoom + Drag + Save + Links + Tooltip</title>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Hebrew:wght@400;700&display=swap" rel="stylesheet">
+  <style>
+    :root { color-scheme: dark; }
+    body { margin:0; background:#0f172a; font-family:'Noto Sans Hebrew', sans-serif; }
+    text {
+      font-size: 14px;
+      fill: #e5e7eb;
+      direction: rtl;
+      unicode-bidi: bidi-override;
+      text-anchor: middle;
+    }
+    circle { fill: steelblue; }
+    .doc circle { fill: #34d399; }        /* מסמכים – ירוק */
+    .folder circle { fill: #38bdf8; }     /* ספריות – כחול */
+    .step circle { fill: #a78bfa; }       /* שלב ראשי – סגול */
+    .invalid circle { stroke: #ef4444; stroke-width: 2.5px; } /* קישור לא תקין */
+    path.link { fill:none; stroke:#94a3b8; stroke-width:1.5px; }
+
+    .toolbar {
+      position: fixed; top:10px; inset-inline-end:10px; z-index:10;
+      background:#111827cc; border:1px solid #ffffff22;
+      border-radius:12px; padding:8px;
+      display:flex; gap:6px; align-items:center;
+    }
+    .toolbar button {
+      background: linear-gradient(135deg, #38bdf8, #a78bfa);
+      border: none; color: #0b1220; font-weight: 700;
+      padding: 6px 10px; border-radius: 8px;
+      cursor: pointer; font-size: 12px;
+    }
+    .toolbar button:hover { filter: brightness(1.05); }
+
+    /* Tooltip */
+    #tooltip {
+      position: fixed;
+  top: -9999px;
+  left: -9999px;
+  background:#0b1220f2; color:#e5e7eb;
+  border:1px solid #ffffff22; border-radius:10px;
+  padding:10px 12px; font-size:13px; max-width: 320px;
+  pointer-events: none; z-index: 9999;
+  box-shadow: 0 8px 24px #0006;
+  direction: rtl; unicode-bidi: plaintext;
+  line-height: 1.4;
+    }
+    #tooltip .title { font-weight: 700; margin-bottom: 4px; }
+    #tooltip .muted { opacity: .8; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <button id="saveBtn">שמור</button>
+    <button id="loadBtn">טען</button>
+    <button id="resetBtn">איפוס</button>
+    <button id="exportBtn">ייצוא</button>
+    <label for="importFile" style="cursor:pointer; background:#334155; color:#e5e7eb; padding:4px 8px; border-radius:8px; font-size:12px;">ייבוא</label>
+    <input id="importFile" type="file" accept="application/json" style="display:none;" />
+  </div>
+
+  <div id="tooltip" aria-hidden="true"></div>
+  <svg id="graph" width="100%" height="100vh"></svg>
+
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <!--<script src="graph-data.js"></script>-->
+  <script src="graph-data.js"></script>
+  
+  <script>
+    const STORAGE_KEY = "tispace-layout-v1";
+
+    const svg = d3.select("#graph");
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+
+    const root = d3.hierarchy(data, d => d.children);
+    const tree = d3.tree().size([width-200, height-200]);
+    tree(root);
+
+    const g = svg.append("g");
+
+    const zoom = d3.zoom().scaleExtent([0.3, 3]).on("zoom", e => {
+      g.attr("transform", e.transform);
+    });
+    svg.call(zoom);
+
+    // URL validation
+    function isValidUrl(u){
+      if(!u || typeof u !== 'string') return false;
+      const trimmed = u.trim();
+      if(trimmed==='' || trimmed==='https://drive.google.com/drive/folders/') return false;
+      try { new URL(trimmed); return true; } catch { return false; }
+    }
+
+    // Links (edges)
+    const link = g.selectAll("path.link")
+      .data(root.links())
+      .join("path")
+      .attr("class","link")
+      .attr("d", d3.linkVertical().x(d=>d.x).y(d=>d.y));
+
+    // Nodes
+    const node = g.selectAll("g.node")
+      .data(root.descendants(), d=>d.data.id)
+      .join("g")
+      .attr("class", d => {
+        let base = `node ${d.data.type||''}`;
+        if(!isValidUrl(d.data.url)) base += " invalid";
+        return base;
+      })
+      .attr("transform", d => `translate(${d.x},${d.y})`)
+      .call(d3.drag()
+        .on("start", dragstarted)
+        .on("drag", dragged)
+        .on("end", dragended)
+      )
+      .on("mouseenter", handleEnter)
+      .on("mousemove", handleMove)
+      .on("mouseleave", handleLeave);
+
+    node.append("circle")
+      .attr("r", 20)
+      .on("click",(ev,d)=>{
+        if(d._dragging) return;
+        if(isValidUrl(d.data.url)) {
+          window.open(d.data.url,"_blank","noopener");
+        }
+      });
+
+    node.append("text")
+      .attr("dy",-30)
+      .text(d => d.data.name);
+
+    function dragstarted(event,d){ d._dragging=false; }
+    function dragged(event,d){
+      d._dragging=true;
+      d.x = event.x;
+      d.y = event.y;
+      d3.select(this).attr("transform",`translate(${d.x},${d.y})`);
+      redrawLinks();
+    }
+    function dragended(event,d){ setTimeout(()=>d._dragging=false,0); }
+
+    function redrawLinks(){
+      link.data(root.links())
+        .attr("d", d3.linkVertical().x(d=>d.x).y(d=>d.y));
+    }
+
+    // Save / Load / Reset / Import / Export
+    function snapshotLayout(){
+      const out={}; root.each(n=>{ out[n.data.id]={x:n.x,y:n.y}; }); return out;
+    }
+    function tryLoadLayout(){
+      try{ return JSON.parse(localStorage.getItem(STORAGE_KEY)); }catch{return null;}
+    }
+    function saveLayout(){
+      localStorage.setItem(STORAGE_KEY,JSON.stringify(snapshotLayout()));
+      toast("נשמר!");
+    }
+    function loadLayout(){
+      const loaded=tryLoadLayout(); if(!loaded){ toast("אין מה לטעון"); return;}
+      root.each(d=>{ const rec=loaded[d.data.id]; if(rec){d.x=rec.x; d.y=rec.y;} });
+      node.attr("transform",d=>`translate(${d.x},${d.y})`); redrawLinks(); toast("נטען.");
+    }
+    function resetLayout(){
+      tree(root);
+      node.attr("transform",d=>`translate(${d.x},${d.y})`); redrawLinks(); toast("ברירת מחדל.");
+    }
+    function exportLayout(){
+      const blob=new Blob([JSON.stringify(snapshotLayout(),null,2)],{type:"application/json"});
+      const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download="layout.json"; a.click();
+      URL.revokeObjectURL(a.href);
+    }
+
+    document.getElementById("saveBtn").onclick=saveLayout;
+    document.getElementById("loadBtn").onclick=loadLayout;
+    document.getElementById("resetBtn").onclick=resetLayout;
+    document.getElementById("exportBtn").onclick=exportLayout;
+
+    document.getElementById("importFile").addEventListener("change",async e=>{
+      const file=e.target.files?.[0]; if(!file) return;
+      try{
+        const obj=JSON.parse(await file.text());
+        root.each(d=>{const rec=obj[d.data.id]; if(rec){d.x=rec.x; d.y=rec.y;}});
+        node.attr("transform",d=>`translate(${d.x},${d.y})`); redrawLinks(); toast("פריסה יובאה.");
+      }catch{ toast("קובץ לא תקין."); } finally{ e.target.value=""; }
+    });
+
+    function toast(msg){
+      const el=document.createElement("div"); el.textContent=msg;
+      el.style.cssText="position:fixed; bottom:16px; left:50%; transform:translateX(-50%); background:#111827ee; color:#e5e7eb; padding:8px 12px; border-radius:8px; border:1px solid #ffffff22; z-index:9999; font-size:12px;";
+      document.body.appendChild(el); setTimeout(()=>el.remove(),1600);
+    }
+
+    // -------- Tooltip handlers --------
+    const tooltip = document.getElementById('tooltip');
+function handleEnter(event, d){
+  updateTooltipContent(d);
+  tooltip.style.left = (event.clientX + 14) + "px";
+  tooltip.style.top  = (event.clientY + 14) + "px";
+  tooltip.style.display = "block";
+}
+
+function handleMove(event, d){
+  tooltip.style.left = (event.clientX + 14) + "px";
+  tooltip.style.top  = (event.clientY + 14) + "px";
+}
+
+function handleLeave(){
+  tooltip.style.display = "none";
+}
+
+
+    function updateTooltipContent(d){
+      // למסמך: כותרת + long; לאחרים: מספר פריטים ומצב קישור
+      if (d.data.type === 'doc') {
+        const title = d.data.name || 'מסמך';
+        const desc  = d.data.long || '';
+        tooltip.innerHTML = `
+          <div class="title">${escapeHtml(title)}</div>
+          <div>${escapeHtml(desc)}</div>
+        `;
+      } else {
+        const title = d.data.name || 'נוד';
+        const kids = d.children ? d.children.length : 0;
+        const linkState = isValidUrl(d.data.url) ? 'קישור תקין' : 'קישור חסר/שגוי';
+        tooltip.innerHTML = `
+          <div class="title">${escapeHtml(title)}</div>
+          <div class="muted">פריטים: ${kids} • ${linkState}</div>
+        `;
+      }
+    }
+
+    function escapeHtml(str){
+      if (typeof str !== 'string') return '';
+      return str
+        .replaceAll('&','&amp;')
+        .replaceAll('<','&lt;')
+        .replaceAll('>','&gt;')
+        .replaceAll('"','&quot;')
+        .replaceAll("'","&#039;");
+    }
+  </script>
+</body>
+</html>
