@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <title>Tree Zoom + Drag + Save + Links + Tooltip + Adaptive Text + Pulse + Faded</title>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Hebrew:wght@400;700&display=swap" rel="stylesheet">
+  <style>
+    :root { color-scheme: dark; }
+    body { margin:0; background:#0f172a; font-family:'Noto Sans Hebrew', sans-serif; }
+    text {
+      fill: #e5e7eb;
+      direction: rtl;
+      unicode-bidi: bidi-override;
+      text-anchor: middle;
+    }
+    circle { fill: steelblue; }
+    .doc circle { fill: #34d399; }
+    .folder circle { fill: #38bdf8; }
+    .step circle { fill: #a78bfa; }
+    .invalid circle { stroke: #ef4444; stroke-width: 2.5px; }
+    path.link { fill:none; stroke:#94a3b8; stroke-width:1.5px; }
+
+    /* Faded nodes */
+    .node.faded circle { opacity: 0.25; }
+    .node.faded text   { opacity: 0.55; }
+    .link.faded        { stroke-dasharray: 4 2; opacity: 0.3; }
+
+    .toolbar {
+      position: fixed; top:10px; inset-inline-end:10px; z-index:10;
+      background:#111827cc; border:1px solid #ffffff22;
+      border-radius:12px; padding:8px;
+      display:flex; gap:6px; align-items:center;
+    }
+    .toolbar button, .toolbar label {
+      background: linear-gradient(135deg, #38bdf8, #a78bfa);
+      border: none; color: #0b1220; font-weight: 700;
+      padding: 6px 10px; border-radius: 8px;
+      cursor: pointer; font-size: 12px;
+    }
+    .toolbar input[type=range] {
+      width: 80px;
+    }
+
+    /* Pulse effect */
+    @keyframes pulse {
+      0%   { r: 20; opacity: 0.6; }
+      70%  { r: 40; opacity: 0; }
+      100% { r: 20; opacity: 0; }
+    }
+    .pulse-ring {
+      fill: none;
+      stroke: #38bdf8;
+      stroke-width: 3;
+      opacity: 0.6;
+      animation: pulse 2s infinite;
+    }
+
+    /* Tooltip */
+    #tooltip {
+      position: fixed;
+      top: -9999px;
+      left: -9999px;
+      background:#0b1220f2; color:#e5e7eb;
+      border:1px solid #ffffff22; border-radius:10px;
+      padding:10px 12px; font-size:13px; max-width: 320px;
+      pointer-events: none; z-index: 9999;
+      box-shadow: 0 8px 24px #0006;
+      direction: rtl; unicode-bidi: plaintext;
+      line-height: 1.4;
+    }
+    #tooltip .title { font-weight: 700; margin-bottom: 4px; }
+    #tooltip .muted { opacity: .8; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <button id="saveBtn">שמור</button>
+    <button id="loadBtn">טען</button>
+    <button id="resetBtn">איפוס</button>
+    <button id="exportBtn">ייצוא</button>
+    <label>גודל טקסט<input id="fontSizeSlider" type="range" min="8" max="28" value="14"></label>
+    <label>פקטור אדפטיבי<input id="adaptSlider" type="range" min="0" max="1" step="0.1" value="1"></label>
+  </div>
+
+  <div id="tooltip" aria-hidden="true"></div>
+  <svg id="graph" width="100%" height="100vh"></svg>
+
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <script src="graph-data.js"></script>
+  <script src="layout.js"></script>
+
+  <script>
+    const svg = d3.select("#graph");
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+
+    let baseFontSize = 14;
+    let adaptFactor = 1.0;
+
+    const root = d3.hierarchy(data, d => d.children);
+    const tree = d3.tree().size([width-200, height-200]);
+    tree(root);
+
+    const g = svg.append("g");
+    const zoom = d3.zoom().scaleExtent([0.3, 3]).on("zoom", e => {
+      g.attr("transform", e.transform);
+      updateTextSize(e.transform.k);
+    });
+    svg.call(zoom);
+
+    function isValidUrl(u){
+      if(!u || typeof u !== 'string') return false;
+      const trimmed = u.trim();
+      if(trimmed==='' || trimmed==='https://drive.google.com/drive/folders/') return false;
+      try { new URL(trimmed); return true; } catch { return false; }
+    }
+
+    const link = g.selectAll("path.link")
+      .data(root.links())
+      .join("path")
+      .attr("class", d => {
+        let base = "link";
+        if (d.target.data.faded) base += " faded";
+        return base;
+      })
+      .attr("d", d3.linkVertical().x(d=>d.x).y(d=>d.y));
+
+    const node = g.selectAll("g.node")
+      .data(root.descendants(), d=>d.data.id)
+      .join("g")
+      .attr("class", d => {
+        let base = `node ${d.data.type||''}`;
+        if (!isValidUrl(d.data.url)) base += " invalid";
+        if (d.data.faded) base += " faded";
+        return base;
+      })
+      .attr("transform", d => `translate(${d.x},${d.y})`)
+      .call(d3.drag()
+        .on("start", dragstarted)
+        .on("drag", dragged)
+        .on("end", dragended)
+      )
+      .on("mouseenter", handleEnter)
+      .on("mousemove", handleMove)
+      .on("mouseleave", handleLeave);
+
+    // Pulse ring
+    node.filter(d => d.data.highlight)
+      .insert("circle", "circle")
+      .attr("class", "pulse-ring")
+      .attr("r", 20);
+
+    // Main circle
+    node.append("circle")
+      .attr("r", 20)
+      .on("click",(ev,d)=>{
+        if(d._dragging) return;
+        if(isValidUrl(d.data.url)) {
+          window.open(d.data.url,"_blank","noopener");
+        }
+      });
+
+    node.append("text")
+      .attr("dy",-30)
+      .text(d => d.data.name)
+      .style("font-size", baseFontSize + "px");
+
+    function dragstarted(event,d){ d._dragging=false; }
+    function dragged(event,d){
+      d._dragging=true;
+      d.x = event.x;
+      d.y = event.y;
+      d3.select(this).attr("transform",`translate(${d.x},${d.y})`);
+      redrawLinks();
+    }
+    function dragended(event,d){ setTimeout(()=>d._dragging=false,0); }
+
+    function redrawLinks(){
+      link.data(root.links())
+        .attr("d", d3.linkVertical().x(d=>d.x).y(d=>d.y));
+    }
+
+    // Save/Load
+    function snapshotLayout(){
+        const positions = {};
+        root.each(n => { positions[n.data.id] = {x:n.x, y:n.y}; });
+        return {
+            positions,
+            settings: {
+            baseFontSize,
+            adaptFactor
+            }
+        };
+        }
+
+    
+
+    function tryLoadLayout(){ return window.savedLayout || null; }
+
+    function saveLayout(){ toast("נשמר בזיכרון, השתמש בייצוא כדי להוריד קובץ."); }
+
+    
+    function loadLayout(){
+        const loaded = tryLoadLayout();
+        if(!loaded){ toast("אין layout.js טעון"); fitToScreen(); return; }
+
+        const pos = loaded.positions || loaded; // תאימות לגרסה ישנה
+        root.each(d => {
+            const rec = pos[d.data.id];
+            if(rec){ d.x = rec.x; d.y = rec.y; }
+        });
+        node.attr("transform", d => `translate(${d.x},${d.y})`);
+        redrawLinks();
+
+        if(loaded.settings){
+            baseFontSize = loaded.settings.baseFontSize ?? baseFontSize;
+            adaptFactor  = loaded.settings.adaptFactor ?? adaptFactor;
+            document.getElementById("fontSizeSlider").value = baseFontSize;
+            document.getElementById("adaptSlider").value = adaptFactor;
+            updateTextSize(d3.zoomTransform(svg.node()).k);
+        }
+
+        fitToScreen();
+        toast("נטען.");
+    }
+
+
+
+    function resetLayout(){
+      tree(root);
+      node.attr("transform",d=>`translate(${d.x},${d.y})`); 
+      redrawLinks(); fitToScreen(); toast("ברירת מחדל.");
+    }
+    function exportLayout(){
+      const jsContent = "window.savedLayout = " + JSON.stringify(snapshotLayout(), null, 2) + ";";
+      const blob = new Blob([jsContent], {type:"application/javascript"});
+      const a=document.createElement("a");
+      a.href=URL.createObjectURL(blob);
+      a.download="layout.js";
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+
+    document.getElementById("saveBtn").onclick=saveLayout;
+    document.getElementById("loadBtn").onclick=loadLayout;
+    document.getElementById("resetBtn").onclick=resetLayout;
+    document.getElementById("exportBtn").onclick=exportLayout;
+
+    // Fit To Screen
+    function fitToScreen() {
+      const bbox = g.node().getBBox();
+      const fullWidth = window.innerWidth;
+      const fullHeight = window.innerHeight;
+      const shrinkFactor = 0.8;
+      const scale = Math.min(fullWidth / bbox.width, fullHeight / bbox.height, 1.5) * shrinkFactor;
+      const translateX = (fullWidth - bbox.width * scale) / 2 - bbox.x * scale;
+      const translateY = (fullHeight - bbox.height * scale) / 2 - bbox.y * scale;
+      svg.transition().duration(750).call(
+        zoom.transform,
+        d3.zoomIdentity.translate(translateX, translateY).scale(scale)
+      );
+    }
+
+    // Adaptive Text Size
+    function updateTextSize(zoomK) {
+      svg.selectAll("text")
+        .style("font-size", (baseFontSize / Math.pow(zoomK, adaptFactor)) + "px");
+    }
+
+    // Tooltip
+    const tooltip = document.getElementById('tooltip');
+    function handleEnter(event, d){
+      updateTooltipContent(d);
+      tooltip.style.left = (event.clientX + 14) + "px";
+      tooltip.style.top  = (event.clientY + 14) + "px";
+      tooltip.style.display = "block";
+    }
+    function handleMove(event, d){
+      tooltip.style.left = (event.clientX + 14) + "px";
+      tooltip.style.top  = (event.clientY + 14) + "px";
+    }
+    function handleLeave(){ tooltip.style.display = "none"; }
+
+    function updateTooltipContent(d){
+      if (d.data.type === 'doc') {
+        const title = d.data.name || 'מסמך';
+        const desc  = d.data.long || '';
+        tooltip.innerHTML = `<div class="title">${escapeHtml(title)}</div><div>${escapeHtml(desc)}</div>`;
+      } else {
+        const title = d.data.name || 'נוד';
+        const kids = d.children ? d.children.length : 0;
+        const linkState = isValidUrl(d.data.url) ? 'קישור תקין' : 'קישור חסר/שגוי';
+        const fadedTxt = d.data.faded ? " • לא רלוונטי" : "";
+        tooltip.innerHTML = `<div class="title">${escapeHtml(title)}</div><div class="muted">פריטים: ${kids} • ${linkState}${fadedTxt}</div>`;
+      }
+    }
+    function escapeHtml(str){
+      if (typeof str !== 'string') return '';
+      return str.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'","&#039;");
+    }
+
+    function toast(msg){
+      const el=document.createElement("div"); el.textContent=msg;
+      el.style.cssText="position:fixed; bottom:16px; left:50%; transform:translateX(-50%); background:#111827ee; color:#e5e7eb; padding:8px 12px; border-radius:8px; border:1px solid #ffffff22; z-index:9999; font-size:12px;";
+      document.body.appendChild(el); setTimeout(()=>el.remove(),1600);
+    }
+
+    // Slider handlers
+    document.getElementById("fontSizeSlider").addEventListener("input", e => {
+      baseFontSize = +e.target.value;
+      updateTextSize(d3.zoomTransform(svg.node()).k);
+    });
+    document.getElementById("adaptSlider").addEventListener("input", e => {
+      adaptFactor = +e.target.value;
+      updateTextSize(d3.zoomTransform(svg.node()).k);
+    });
+
+    window.addEventListener("load", () => { loadLayout(); fitToScreen(); });
+  </script>
+</body>
+</html>
