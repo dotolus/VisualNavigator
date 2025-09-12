@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Tree Node",
+  "description": "סכמה להיררכיה של פרויקטים, תיקיות ומסמכים",
+  "type": "object",
+  "required": ["id", "type", "name"],
+  "properties": {
+    "id": { "type": "string" },
+    "type": { "type": "string", "enum": ["step", "folder", "doc"] },
+    "name": { "type": "string" },
+    "short": { "type": "string" },
+    "long": { "type": "string" },
+    "url": { "type": "string", "format": "uri" },
+    "faded": { "type": "boolean" },
+    "highlight": { "type": "boolean" },
+    "children": {
+      "type": "array",
+      "items": { "$ref": "#" }
+    }
+  },
+  "additionalProperties": false
+}

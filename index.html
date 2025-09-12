@@ -11,7 +11,7 @@
       fill: #e5e7eb;
       direction: rtl;
       unicode-bidi: bidi-override;
-      text-anchor: middle;
+      /*text-anchor: middle;*/
     }
     circle { fill: steelblue; }
     .doc circle { fill: #34d399; }
@@ -163,7 +163,9 @@
     node.append("text")
       .attr("dy",-30)
       .text(d => d.data.name)
-      .style("font-size", baseFontSize + "px");
+      .style("font-size", baseFontSize + "px")
+      .style("direction", d => /[א-ת]/.test(d.data.name) ? "rtl" : "ltr")
+      .style("unicode-bidi", d => /[א-ת]/.test(d.data.name) ? "bidi-override" : "plaintext");
 
     function dragstarted(event,d){ d._dragging=false; }
     function dragged(event,d){
